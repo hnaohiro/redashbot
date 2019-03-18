@@ -1,10 +1,10 @@
 "use strict";
 
 const Botkit = require("botkit");
-const webshot = require("webshot");
 const tempfile = require("tempfile");
 const fs = require("fs");
 const request = require("request");
+const puppeteer = require("puppeteer");
 
 // This configuration can gets overwritten when process.env.SLACK_MESSAGE_EVENTS is given.
 const DEFAULT_SLACK_MESSAGE_EVENTS = "direct_message,direct_mention,mention";
@@ -52,9 +52,20 @@ controller.spawn({
   token: slackBotToken
 }).startRTM();
 
+const takeSnapshot = async (url, outputFile) => {
+  const browser = await puppeteer.launch();
+  const page = await browser.newPage();
+  await page.setViewport({ width: 800, height: 600 });
+  await page.goto(url);
+  await page.waitFor(3000);
+  await page.screenshot({path: outputFile});
+  await browser.close();
+};
+
 Object.keys(redashApiKeysPerHost).forEach((redashHost) => {
   const redashHostAlias = redashApiKeysPerHost[redashHost]["alias"];
   const redashApiKey    = redashApiKeysPerHost[redashHost]["key"];
+
   controller.hears(`${redashHost}/queries/([0-9]+)#([0-9]+)`, slackMessageEvents, (bot, message) => {
     const originalUrl = message.match[0];
     const queryId = message.match[1];
@@ -62,45 +73,24 @@ Object.keys(redashApiKeysPerHost).forEach((redashHost) => {
     const queryUrl = `${redashHostAlias}/queries/${queryId}#${visualizationId}`;
     const embedUrl = `${redashHostAlias}/embed/query/${queryId}/visualization/${visualizationId}?api_key=${redashApiKey}`;
 
-    bot.reply(message, `Taking screenshot of ${originalUrl}`);
     bot.botkit.log(queryUrl);
     bot.botkit.log(embedUrl);
 
     const outputFile = tempfile(".png");
-    const webshotOptions = {
-      screenSize: {
-        width: 720,
-        height: 360
-      },
-      shotSize: {
-        width: 720,
-        height: "all"
-      },
-      renderDelay: 2000,
-      timeout: 100000
-    };
 
-    webshot(embedUrl, outputFile, webshotOptions, (err) => {
-      if (err) {
-        const msg = `Something wrong happend in take a screen capture : ${err}`;
-        bot.reply(message, msg);
-        return bot.botkit.log.error(msg);
-      }
-
+    takeSnapshot(embedUrl, outputFile).then(() => {
       bot.botkit.log.debug(outputFile);
       bot.botkit.log.debug(Object.keys(message));
       bot.botkit.log(message.user + ":" + message.type + ":" + message.channel + ":" + message.text);
-
+  
       const options = {
         token: slackBotToken,
         filename: `query-${queryId}-visualization-${visualizationId}.png`,
         file: fs.createReadStream(outputFile),
         channels: message.channel
       };
-
-      // bot.api.file.upload cannot upload binary file correctly, so directly call Slack API.
       request.post({ url: "https://api.slack.com/api/files.upload", formData: options }, (err, resp, body) => {
-        if (err) {
+      if (err) {
           const msg = `Something wrong happend in file upload : ${err}`;
           bot.reply(message, msg);
           bot.botkit.log.error(msg);
